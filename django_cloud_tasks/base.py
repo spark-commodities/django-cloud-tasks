@@ -71,6 +71,54 @@ class ComplexEncoder(json.JSONEncoder):
             return super().default(obj)
 
 
+def log_execution(task_name, retry_count_before_error=5):
+    """
+    Decorator to make a task verbose during execution.
+    """
+    def decorator(func):
+        def inner_run(request, *task_args, **task_kwargs):
+
+            retry_count = int(
+                request.request_headers.get("HTTP_X_APPENGINE_TASKRETRYCOUNT", "0")
+            )
+
+            logger.info(
+                f"Asynchronous task {task_name}: starting execution "
+                f"(task_id={request.task_id}, current retry_count={retry_count})."
+            )
+            exception = None
+            try:
+                func(*task_args, **task_kwargs)
+            except Exception as e:
+                exception = e
+                raise e from None
+            finally:
+                if exception is None:
+                    logger.info(
+                        f"Asynchronous task {task_name}: executed with success "
+                        f"(task_id={request.task_id}, current "
+                        f"retry_count={retry_count})."
+                    )
+                else:
+                    if retry_count > retry_count_before_error:
+                        logger.exception(
+                            f"Asynchronous task {task_name}: after many attempts, "
+                            f"failed to execute it properly"
+                            f"(task_id={request.task_id}, current "
+                            f"retry_count={retry_count}, error={exception})."
+                        )
+                    else:
+                        logger.warning(
+                            f"Asynchronous task {task_name}: in failure "
+                            f"(task_id={request.task_id}, current "
+                            f"retry_count={retry_count}, error={exception})."
+                        )
+
+        return inner_run
+
+    return decorator
+
+
 def retry(retry_limit, retry_interval):
     """
     Decorator for retrying task scheduling
@@ -281,11 +329,9 @@ class CloudTaskWrapper(object):
             request is created from `CloudTaskMockRequest`
         """
         request = mock_request or CloudTaskMockRequest()
-        return (
-            self._base_task.run(request=request, **self._data)
-            if self._data
-            else self._base_task.run(request=request)
-        )
+        data = self._data or {}
+
+        return log_execution(task_name=self._internal_task_name)(self._base_task.run)(request=request, **data)
 
     def set_queue(self, queue):
         self._queue = queue
